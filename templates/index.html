@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>English Pronunciation Practice</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 16px;
+            line-height: 1.6;
+        }
+
+        h1 {
+            margin-bottom: 8px;
+        }
+
+        .card {
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 16px;
+            margin-top: 16px;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 12px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+
+        button {
+            margin-right: 10px;
+            margin-top: 10px;
+            padding: 10px 16px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        .status {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+
+        .result-block {
+            white-space: pre-wrap;
+            background: #f7f7f7;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 8px;
+        }
+
+        .label {
+            font-weight: bold;
+            margin-top: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>English Pronunciation Practice</h1>
+    <p>Step 1: enter a target sentence, record your voice, and get AI feedback.</p>
+
+    <div class="card">
+        <label for="targetText"><strong>Target sentence</strong></label>
+        <textarea id="targetText" placeholder="Example: I think this is a good idea."></textarea>
+
+        <div>
+            <button id="startBtn">Start Recording</button>
+            <button id="stopBtn" disabled>Stop Recording</button>
+            <button id="uploadBtn" disabled>Upload & Analyze</button>
+        </div>
+
+        <div class="status" id="status">Status: idle</div>
+        <audio id="audioPlayer" controls style="margin-top: 12px; width: 100%;"></audio>
+    </div>
+
+    <div class="card">
+        <div class="label">Target sentence</div>
+        <div class="result-block" id="targetResult">-</div>
+
+        <div class="label">Recognized text</div>
+        <div class="result-block" id="recognizedResult">-</div>
+
+        <div class="label">AI feedback</div>
+        <div class="result-block" id="feedbackResult">-</div>
+    </div>
+
+    <script>
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let audioBlob = null;
+
+        const startBtn = document.getElementById("startBtn");
+        const stopBtn = document.getElementById("stopBtn");
+        const uploadBtn = document.getElementById("uploadBtn");
+        const statusEl = document.getElementById("status");
+        const audioPlayer = document.getElementById("audioPlayer");
+        const targetTextEl = document.getElementById("targetText");
+
+        const targetResult = document.getElementById("targetResult");
+        const recognizedResult = document.getElementById("recognizedResult");
+        const feedbackResult = document.getElementById("feedbackResult");
+
+        startBtn.addEventListener("click", async () => {
+            try {
+                audioChunks = [];
+                audioBlob = null;
+                audioPlayer.src = "";
+
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                // 常见浏览器下 webm/opus 比较常见
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    audioPlayer.src = audioUrl;
+                    uploadBtn.disabled = false;
+                    statusEl.textContent = "Status: recording finished";
+                };
+
+                mediaRecorder.start();
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                uploadBtn.disabled = true;
+                statusEl.textContent = "Status: recording...";
+            } catch (err) {
+                statusEl.textContent = "Status: failed to access microphone";
+                alert("Microphone access failed: " + err);
+            }
+        });
+
+        stopBtn.addEventListener("click", () => {
+            if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+
+                // 关闭轨道，释放麦克风
+                mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            }
+
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        });
+
+        uploadBtn.addEventListener("click", async () => {
+            const targetText = targetTextEl.value.trim();
+
+            if (!targetText) {
+                alert("Please enter a target sentence.");
+                return;
+            }
+
+            if (!audioBlob) {
+                alert("Please record audio first.");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("target_text", targetText);
+            formData.append("audio", audioBlob, "recording.webm");
+
+            statusEl.textContent = "Status: uploading and analyzing...";
+            uploadBtn.disabled = true;
+
+            targetResult.textContent = "-";
+            recognizedResult.textContent = "-";
+            feedbackResult.textContent = "-";
+
+            try {
+                const response = await fetch("/analyze", {
+                    method: "POST",
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || "Unknown error");
+                }
+
+                targetResult.textContent = data.target_text || "-";
+                recognizedResult.textContent = data.recognized_text || "-";
+                feedbackResult.textContent = data.feedback || "-";
+
+                statusEl.textContent = "Status: done";
+            } catch (err) {
+                statusEl.textContent = "Status: failed";
+                alert("Analyze failed: " + err.message);
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
