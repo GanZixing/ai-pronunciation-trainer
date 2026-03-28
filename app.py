@@ -10,8 +10,15 @@ from services.suspicious_words import detect_suspicious_words
 from utils.text_normalize import normalize_text
 from utils.audio_convert import allowed_ext, convert_to_wav
 from services.phonetics import get_sentence_phonetics
+from audio_analyzer import AudioAnalyzer
+from training_data_store import TrainingDataStore
+from llama_client import LlamaClient, OllamaClientError
 
 app = Flask(__name__)
+
+analyzer = AudioAnalyzer()
+data_store = TrainingDataStore()
+llama_client = LlamaClient(model="llama3")
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -112,13 +119,14 @@ const prettyResultEl = document.getElementById("prettyResult");
 const audioPlayer = document.getElementById("audioPlayer");
 
 function escapeHtml(text) {
+    text = String(text ?? "");
     return text.replace(/[&<>"]/g, function(m) {
-        return ({
+        return {
             '&': '&amp;',
             '<': '&lt;',
             '>': '&gt;',
             '"': '&quot;'
-        })[m];
+        }[m];
     });
 }
 
@@ -200,8 +208,27 @@ async function stopRecording() {
                 `;
             }
 
+            let llmHtml = "";
+            if (data.llm_feedback) {
+                llmHtml = `
+                    <h3>AI Feedback</h3>
+                    <p><b>Overall:</b> ${escapeHtml(data.llm_feedback.overall_comment || "")}</p>
+                    <p><b>中文总结:</b> ${escapeHtml(data.llm_feedback.pronunciation_summary_cn || "")}</p>
+                    <p><b>Main Problems:</b></p>
+                    <ul>${(data.llm_feedback.main_problems || []).map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>
+                    <p><b>Correction Tips:</b></p>
+                    <ul>${(data.llm_feedback.correction_tips || []).map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>
+                    <p><b>Practice Words:</b> ${escapeHtml((data.llm_feedback.practice_words || []).join(", "))}</p>
+                    <p><b>Practice Sentence:</b> ${escapeHtml(data.llm_feedback.practice_sentence || "")}</p>
+                    <p><b>Encouragement:</b> ${escapeHtml(data.llm_feedback.encouragement || "")}</p>
+                `;
+            } else if (data.llm_feedback_error) {
+                llmHtml = `<h3>AI Feedback</h3><p style="color:red;">${escapeHtml(data.llm_feedback_error)}</p>`;
+            }
+
             prettyResultEl.innerHTML = `
                 <h3>Summary</h3>
+                <p><b>Sample ID:</b> ${escapeHtml(data.sample_id || "")}</p>
                 <p><b>Target:</b> ${escapeHtml(data.target_text || "")}</p>
                 <p><b>Recognized:</b> ${escapeHtml(data.recognized_text || "")}</p>
                 <p><b>Similarity:</b> ${data.similarity_score ?? ""}</p>
@@ -210,6 +237,8 @@ async function stopRecording() {
 
                 <h3>Feedback</h3>
                 ${feedbackHtml}
+
+                ${llmHtml}
 
                 <h3>Suspicious Words</h3>
                 ${suspiciousHtml}
@@ -281,7 +310,71 @@ def analyze():
             suspicious_words=suspicious_words
         )
 
+        # =========================
+        # 构建结构化分析结果（用于训练数据）
+        # =========================
+        analysis_result = analyzer.analyze(
+            target_text=target_text,
+            recognized_text=transcribed["recognized_text"],
+            similarity_score=similarity,
+            raw_features={
+                "speech_rate_wpm": rhythm.get("speech_rate_wpm"),
+                "pause_ok": rhythm.get("pause_ok"),
+                "stress_ok": None,
+                "intonation_ok": None
+            }
+        )
+
+        llm_feedback = None
+        llm_feedback_error = None
+
+        try:
+            llm_feedback = llama_client.ask_with_chat({
+                "target_text": target_text,
+                "recognized_text": transcribed["recognized_text"],
+                "normalized_target": normalized_target,
+                "normalized_recognized": normalized_recognized,
+                "similarity_score": round(float(similarity), 4),
+                "alignment": alignment,
+                "rhythm": rhythm,
+                "word_features": word_features,
+                "suspicious_words": suspicious_words,
+                "phonetics": phonetics,
+                "analyzer_summary": analysis_result
+            })
+        except OllamaClientError as e:
+            llm_feedback_error = str(e)
+        except Exception as e:
+            llm_feedback_error = f"unexpected llama error: {e}"
+
+        # =========================
+        # 存储训练数据
+        # =========================
+        saved_sample = data_store.save_sample(
+            target_text=target_text,
+            recognized_text=transcribed["recognized_text"],
+            analysis_result={
+                "alignment": alignment,
+                "rhythm": rhythm,
+                "word_features": word_features,
+                "suspicious_words": suspicious_words,
+                "phonetics": phonetics,
+                "simple_feedback": feedback,
+                "analyzer_summary": analysis_result
+            },
+            similarity_score=float(similarity),
+            speaker_id="default_user",
+            source_audio_path=wav_path,
+            llm_feedback=llm_feedback,
+            tags=["auto_saved", "v1"],
+            extra={
+                "llm_feedback_error": llm_feedback_error
+            }
+        )
+
         return jsonify({
+            "sample_id": saved_sample["sample_id"],
+
             "target_text": target_text,
             "recognized_text": transcribed["recognized_text"],
             "normalized_target": normalized_target,
@@ -297,7 +390,10 @@ def analyze():
             "word_features": word_features,
             "suspicious_words": suspicious_words,
             "feedback": feedback,
-            "phonetics": phonetics
+            "phonetics": phonetics,
+
+            "llm_feedback": llm_feedback,
+            "llm_feedback_error": llm_feedback_error
         })
 
     except Exception as e:
